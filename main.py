@@ -1,10 +1,10 @@
 import cv2
 import numpy as np
-import time  # <--- NOWE: do mierzenia czasu
-from datetime import datetime # <--- NOWE: do ładnej daty w pliku
+import time
+from datetime import datetime
 
 def process_frame_user_logic(frame):
-    # --- TA FUNKCJA POZOSTAJE BEZ ZMIAN ---
+    # --- TA FUNKCJA POZOSTAJE BEZ ZMIAN (Wykrywanie krawędzi) ---
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     denoised = cv2.medianBlur(gray, 9)
     binary = cv2.adaptiveThreshold(
@@ -32,11 +32,11 @@ def process_frame_user_logic(frame):
     return final_mask
 
 def log_warning_to_file():
-    """Funkcja zapisująca ostrzeżenie do pliku"""
+    """Zapisuje alarm do pliku"""
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"[{timestamp}] OSTRZEZENIE: Wykryto zatrzymanie tasmy!\n"
-        with open("warning.txt", "a") as f: # "a" oznacza append (dopisywanie na końcu)
+        msg = f"[{timestamp}] OSTRZEZENIE: Taśma produkcyjna zatrzymana!\n"
+        with open("warning.txt", "a") as f:
             f.write(msg)
         print(msg.strip())
     except Exception as e:
@@ -46,24 +46,32 @@ def main(video_path):
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        print("Błąd: Nie można otworzyć wideo/kamery.")
+        print("Błąd: Nie można otworzyć wideo.")
         return
 
     frame_count = 0
     
-    # --- ZMIENNE STABILIZACJI POZYCJI ---
+    # Zmienne do pomiaru szerokości
     last_valid_start = None
     last_valid_end = None
     max_jump_limit = 30
 
-    # --- ZMIENNE DO WYKRYWANIA ZATRZYMANIA (NOWE) ---
-    last_movement_time = time.time() # Czas ostatniego ruchu
-    prev_center_pos = 0              # Poprzednia pozycja środka
-    is_stopped_flag = False          # Czy już zgłosiliśmy błąd?
+    # --- ZMIENNE DO WYKRYWANIA RUCHU TAŚMY (PIXELE) ---
+    prev_gray_frame = None       # Tu zapiszemy poprzednią klatkę
+    last_movement_time = time.time()
+    is_stopped_flag = False
     
     # KONFIGURACJA ZATRZYMANIA
-    MOVEMENT_THRESHOLD = 2  # Ile pikseli musi się ruszyć, żeby uznać to za ruch
-    TIME_TO_WAIT = 10        # Ile sekund bez ruchu oznacza awarię
+    # Ile sekund braku zmian oznacza awarię:
+    TIME_TO_WAIT = 3.0           
+    
+    # Czułość na zmianę koloru piksela (0-255). 
+    # 25 oznacza, że piksel musi zmienić się znacząco, żeby uznać to za ruch (eliminuje szum kamery).
+    PIXEL_DIFF_THRESHOLD = 2   
+    
+    # Ile % ekranu musi się ruszać, żeby uznać, że taśma jedzie.
+    # Np. 0.005 oznacza 0.5% pikseli. Jeśli taśma jest jednolita, daj mało. Jeśli wzorzysta, można więcej.
+    MIN_MOTION_PERCENTAGE = 0.001 
 
     while True:
         ret, frame = cap.read()
@@ -72,14 +80,64 @@ def main(video_path):
         
         frame_count += 1
         height, width = frame.shape[:2]
+        total_pixels = height * width
 
-        # 1. ALGORYTM 
+        # 1. PRZYGOTOWANIE DO WYKRYWANIA RUCHU (GLOBALNEGO)
+        # Konwersja na szary i lekkie rozmycie, żeby szum nie był traktowany jako ruch
+        gray_current = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_current_blurred = cv2.GaussianBlur(gray_current, (21, 21), 0)
+
+        motion_detected = False
+        motion_ratio = 0.0
+
+        if prev_gray_frame is not None:
+            # Obliczamy różnicę między klatką obecną a poprzednią
+            frame_delta = cv2.absdiff(prev_gray_frame, gray_current_blurred)
+            
+            # Progowanie: zaznaczamy na biało tylko te piksele, które zmieniły się mocno
+            thresh = cv2.threshold(frame_delta, PIXEL_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+            
+            # Liczymy ile pikseli jest białych (zmienionych)
+            changed_pixels_count = cv2.countNonZero(thresh)
+            
+            # Obliczamy jaki to procent całego obrazu
+            motion_ratio = changed_pixels_count / total_pixels
+
+            # Decyzja: czy jest ruch?
+            if motion_ratio > MIN_MOTION_PERCENTAGE:
+                motion_detected = True
+                last_movement_time = time.time()
+                is_stopped_flag = False
+            else:
+                motion_detected = False
+
+        # Zapisujemy obecną klatkę jako "poprzednią" dla następnej pętli
+        prev_gray_frame = gray_current_blurred
+
+        # --- OBSŁUGA ALARMU ---
+        elapsed_time = time.time() - last_movement_time
+        
+        draw_frame = frame.copy() # Kopia do rysowania
+
+        if elapsed_time > TIME_TO_WAIT:
+            # ALARM: Taśma stoi
+            if not is_stopped_flag:
+                log_warning_to_file()
+                is_stopped_flag = True
+            
+            cv2.putText(draw_frame, f"ALARM: STOP TASMY! ({elapsed_time:.1f}s)", (50, height // 2), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        
+        # Opcjonalnie: Wyświetlanie poziomu ruchu na ekranie (dla debugowania)
+        color_status = (0, 255, 0) if motion_detected else (0, 165, 255)
+        cv2.putText(draw_frame, f"Ruch pixeli: {motion_ratio:.5f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_status, 2)
+
+
+        # 2. ALGORYTM POMIARU (To co było wcześniej)
         algorithm_mask = process_frame_user_logic(frame)
 
-        # 2. KOPIA DO RYSOWANIA
-        draw_frame = frame.copy()
-
-        # 3. POMIAR 
+        # 3. POMIAR SZEROKOŚCI
         scan_y = int(height * 0.85)
         row_pixels = algorithm_mask[scan_y, :]
         white_indices = np.where(row_pixels > 0)[0]
@@ -104,51 +162,18 @@ def main(video_path):
                     current_end = curr
                     break
 
-        # Stabilizacja
         if current_start is not None and current_end is not None and current_end > current_start:
             if last_valid_start is None:
                 last_valid_start = current_start
                 last_valid_end = current_end
             else:
-                prev_center_calc = (last_valid_start + last_valid_end) / 2
-                curr_center_calc = (current_start + current_end) / 2
-                
-                if abs(curr_center_calc - prev_center_calc) < max_jump_limit:
+                prev_c = (last_valid_start + last_valid_end) / 2
+                curr_c = (current_start + current_end) / 2
+                if abs(curr_c - prev_c) < max_jump_limit:
                     last_valid_start = current_start
                     last_valid_end = current_end
-                else:
-                    pass
 
-        # --- LOGIKA WYKRYWANIA ZATRZYMANIA (NOWA) ---
-        if last_valid_start is not None and last_valid_end is not None:
-            # Obliczamy aktualny środek elementu
-            current_center_pos = (last_valid_start + last_valid_end) / 2
-            
-            # Sprawdzamy, czy zmienił się względem poprzedniej klatki
-            diff = abs(current_center_pos - prev_center_pos)
-            
-            if diff > MOVEMENT_THRESHOLD:
-                # JEST RUCH
-                last_movement_time = time.time() # Resetujemy licznik czasu
-                prev_center_pos = current_center_pos
-                is_stopped_flag = False # Resetujemy flagę alarmu
-            else:
-                # BRAK RUCHU
-                # Sprawdzamy ile czasu minęło od ostatniego ruchu
-                elapsed_time = time.time() - last_movement_time
-                
-                if elapsed_time > TIME_TO_WAIT:
-                    # Jeśli stoi dłużej niż limit
-                    if not is_stopped_flag:
-                        log_warning_to_file()
-                        is_stopped_flag = True # Zapobiega zapisywaniu co klatkę
-                    
-                    # Rysujemy wielki napis na ekranie
-                    cv2.putText(draw_frame, "ALARM: STOP TASMY!", (50, height // 2), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
-
-
-        # --- RYSOWANIE ---
+        # --- RYSOWANIE LINII POMIAROWYCH ---
         cv2.line(draw_frame, (0, scan_y), (width, scan_y), (100, 100, 100), 1)
 
         if last_valid_start is not None and last_valid_end is not None:
