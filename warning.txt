@@ -1,8 +1,2 @@
-[2025-12-06 19:33:22] OSTRZEZENIE: Wykryto zatrzymanie tasmy!
-[2025-12-06 19:33:30] OSTRZEZENIE: Wykryto zatrzymanie tasmy!
-[2025-12-06 19:35:21] OSTRZEZENIE: Wykryto zatrzymanie tasmy!
-[2025-12-06 19:35:30] OSTRZEZENIE: Wykryto zatrzymanie tasmy!
-[2025-12-06 19:35:43] OSTRZEZENIE: Wykryto zatrzymanie tasmy!
-[2025-12-06 19:37:07] OSTRZEZENIE: Taúma produkcyjna zatrzymana!
-[2025-12-06 19:37:48] OSTRZEZENIE: Taúma produkcyjna zatrzymana!
-[2025-12-06 19:47:30] OSTRZEZENIE: Taúma produkcyjna zatrzymana!
+[2025-12-06 19:47:30] OSTRZEZENIE: Ta≈õma produkcyjna zatrzymana!
+
