@@ -1,208 +1,177 @@
 import cv2
-import numpy as np
 import time
+import os
 from datetime import datetime
 
-def process_frame_user_logic(frame):
-    # --- TA FUNKCJA POZOSTAJE BEZ ZMIAN (Wykrywanie krawędzi) ---
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    denoised = cv2.medianBlur(gray, 9)
-    binary = cv2.adaptiveThreshold(
-        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 19, 1.2
-    )
-    kernel = np.ones((3,3), np.uint8)
-    cleaned = cv2.erode(binary, kernel, iterations=1)
-    cleaned = cv2.dilate(cleaned, kernel, iterations=2) 
+# Importujemy nasze moduły (muszą być w tym samym folderze)
+from size import TapeMeasurer
+from sections import SectionDetector
 
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
-    final_mask = np.zeros_like(cleaned)
-    
-    min_area = 80
-    min_dimension = 60 
+# --- KONFIGURACJA ---
+VIDEO_SOURCE = 'videos/test2.mkv'
+DATA_FILE = "data/pomiary.txt" # Plik z surowymi danymi (czas + pomiar)
+WARNING_FILE = "data/warning.txt"
+STATS_FILE = "data/max_min_values.txt" # Nowy plik do statystyk
 
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        width = stats[i, cv2.CC_STAT_WIDTH]
-        height = stats[i, cv2.CC_STAT_HEIGHT]
-        
-        if area >= min_area and (width > min_dimension or height > min_dimension):
-            final_mask[labels == i] = 255
+MEASUREMENT_LOG_INTERVAL = 0.5  # Co ile sekund zapisywać szerokość do pliku pomiary
+TIME_TO_WAIT_FOR_STOP = 3.0      # Alarm braku ruchu
 
-    return final_mask
-
-def log_warning_to_file():
-    """Zapisuje alarm do pliku"""
+def log_data(filename, text):
+    """Uniwersalna funkcja zapisu"""
     try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"[{timestamp}] OSTRZEZENIE: Taśma produkcyjna zatrzymana!\n"
-        with open("warning.txt", "a") as f:
-            f.write(msg)
-        print(msg.strip())
+        with open(filename, "a") as f:
+            f.write(text)
     except Exception as e:
-        print(f"Błąd zapisu pliku: {e}")
+        print(f"Błąd zapisu do {filename}: {e}")
 
-def main(video_path):
-    cap = cv2.VideoCapture(video_path)
+def save_section_stats(section_id, measurements):
+    """Oblicza min/max i zapisuje do pliku max_min_values.txt"""
+    if not measurements:
+        return # Brak danych, nic nie zapisujemy
 
-    if not cap.isOpened():
-        print("Błąd: Nie można otworzyć wideo.")
-        return
-
-    frame_count = 0
+    min_val = min(measurements)
+    max_val = max(measurements)
+    avg_val = sum(measurements) / len(measurements)
     
-    # Zmienne do pomiaru szerokości
-    last_valid_start = None
-    last_valid_end = None
-    max_jump_limit = 30
+    ts_str = datetime.now().strftime("%H:%M:%S")
+    
+    # Zmieniony format statystyk: z czasem i średnią
+    line = (f"[{ts_str}] Sekcja {section_id} -> "
+            f"MIN: {min_val:.2f} | MAX: {max_val:.2f} | Średnia: {avg_val:.2f}\n")
+    
+    log_data(STATS_FILE, line)
+    print(f"--- ZAPISANO STATYSTYKI: {line.strip()} ---")
 
-    # --- ZMIENNE DO WYKRYWANIA RUCHU TAŚMY (PIXELE) ---
-    prev_gray_frame = None       # Tu zapiszemy poprzednią klatkę
+def main():
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    
+    measurer = TapeMeasurer()
+    section_detector = SectionDetector()
+
+    # Zmienne stanu
+    prev_gray_frame = None
     last_movement_time = time.time()
+    last_measurement_log_time = 0
     is_stopped_flag = False
-    
-    # KONFIGURACJA ZATRZYMANIA
-    # Ile sekund braku zmian oznacza awarię:
-    TIME_TO_WAIT = 3.0           
-    
-    # Czułość na zmianę koloru piksela (0-255). 
-    # 25 oznacza, że piksel musi zmienić się znacząco, żeby uznać to za ruch (eliminuje szum kamery).
-    PIXEL_DIFF_THRESHOLD = 2   
-    
-    # Ile % ekranu musi się ruszać, żeby uznać, że taśma jedzie.
-    # Np. 0.005 oznacza 0.5% pikseli. Jeśli taśma jest jednolita, daj mało. Jeśli wzorzysta, można więcej.
-    MIN_MOTION_PERCENTAGE = 0.001 
+
+    # --- NOWE ZMIENNE DO STATYSTYK ---
+    current_section_widths = [] # Tu zbieramy pomiary z obecnej sekcji
+    section_counter = 1         # Numeracja sekcji
+
+    # Tworzymy/Czyścimy plik statystyk na starcie
+    with open(STATS_FILE, "w") as f:
+        f.write(f"--- Start analizy: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+
+    print(f"Start systemu.")
+    print(f"Logi: {DATA_FILE}")
+    print(f"Statystyki: {STATS_FILE}")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
+        current_time = time.time()
         
-        frame_count += 1
-        height, width = frame.shape[:2]
-        total_pixels = height * width
-
-        # 1. PRZYGOTOWANIE DO WYKRYWANIA RUCHU (GLOBALNEGO)
-        # Konwersja na szary i lekkie rozmycie, żeby szum nie był traktowany jako ruch
-        gray_current = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_current_blurred = cv2.GaussianBlur(gray_current, (21, 21), 0)
-
+        # 1. Obsługa alarmu STOP (Detekcja ruchu)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray_blur = cv2.GaussianBlur(gray, (21, 21), 0)
+        
         motion_detected = False
-        motion_ratio = 0.0
-
         if prev_gray_frame is not None:
-            # Obliczamy różnicę między klatką obecną a poprzednią
-            frame_delta = cv2.absdiff(prev_gray_frame, gray_current_blurred)
-            
-            # Progowanie: zaznaczamy na biało tylko te piksele, które zmieniły się mocno
-            thresh = cv2.threshold(frame_delta, PIXEL_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
-            
-            # Liczymy ile pikseli jest białych (zmienionych)
-            changed_pixels_count = cv2.countNonZero(thresh)
-            
-            # Obliczamy jaki to procent całego obrazu
-            motion_ratio = changed_pixels_count / total_pixels
-
-            # Decyzja: czy jest ruch?
-            if motion_ratio > MIN_MOTION_PERCENTAGE:
+            delta = cv2.absdiff(prev_gray_frame, gray_blur)
+            thresh = cv2.threshold(delta, 2, 255, cv2.THRESH_BINARY)[1]
+            if cv2.countNonZero(thresh) / (frame.shape[0]*frame.shape[1]) > 0.001:
                 motion_detected = True
-                last_movement_time = time.time()
+                last_movement_time = current_time
                 is_stopped_flag = False
-            else:
-                motion_detected = False
+        prev_gray_frame = gray_blur
 
-        # Zapisujemy obecną klatkę jako "poprzednią" dla następnej pętli
-        prev_gray_frame = gray_current_blurred
-
-        # --- OBSŁUGA ALARMU ---
-        elapsed_time = time.time() - last_movement_time
-        
-        draw_frame = frame.copy() # Kopia do rysowania
-
-        if elapsed_time > TIME_TO_WAIT:
-            # ALARM: Taśma stoi
+        if current_time - last_movement_time > TIME_TO_WAIT_FOR_STOP:
             if not is_stopped_flag:
-                log_warning_to_file()
+                # ZMIANA: Ujednolicony format timestamp
+                ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                log_data(WARNING_FILE, f"[{ts_str}] OSTRZEZENIE: Taśma produkcyjna zatrzymana!\n")
+                print("ALARM: STOP TAŚMY")
                 is_stopped_flag = True
-            
-            cv2.putText(draw_frame, f"ALARM: STOP TASMY! ({elapsed_time:.1f}s)", (50, height // 2), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+            cv2.putText(frame, "ALARM: STOP!", (50, frame.shape[0]//2), 
+                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,0,255), 3)
+
+        # 2. Pomiar szerokości
+        mask = measurer.get_mask(frame)
+        width_px, start_x, end_x, scan_y = measurer.measure(frame, mask)
         
-        # Opcjonalnie: Wyświetlanie poziomu ruchu na ekranie (dla debugowania)
-        color_status = (0, 255, 0) if motion_detected else (0, 165, 255)
-        cv2.putText(draw_frame, f"Ruch pixeli: {motion_ratio:.5f}", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_status, 2)
+        draw_frame = frame.copy()
+        cv2.line(draw_frame, (0, scan_y), (frame.shape[1], scan_y), (100, 100, 100), 1)
 
+        section_found_now = False
 
-        # 2. ALGORYTM POMIARU (To co było wcześniej)
-        algorithm_mask = process_frame_user_logic(frame)
-
-        # 3. POMIAR SZEROKOŚCI
-        scan_y = int(height * 0.85)
-        row_pixels = algorithm_mask[scan_y, :]
-        white_indices = np.where(row_pixels > 0)[0]
-
-        current_start = None
-        current_end = None
-        min_neighbors = 7
-        search_window = 15
-        
-        if len(white_indices) > min_neighbors:
-            for i in range(len(white_indices) - min_neighbors):
-                curr = white_indices[i]
-                ahead = white_indices[i + min_neighbors]
-                if ahead - curr < search_window:
-                    current_start = curr
-                    break 
+        if width_px is not None:
+            # 3. Sprawdzamy czy to NOWA SEKCJA
+            is_section, score = section_detector.check_for_section(frame, start_x, end_x, scan_y)
             
-            for i in range(len(white_indices) - 1, min_neighbors, -1):
-                curr = white_indices[i]
-                behind = white_indices[i - min_neighbors]
-                if curr - behind < search_window:
-                    current_end = curr
-                    break
+            if is_section:
+                # A) Zapisujemy statystyki POPRZEDNIEJ sekcji
+                save_section_stats(section_counter, current_section_widths)
+                
+                # B) Zapisujemy separator ---section--- do pliku pomiary.txt
+                log_data(DATA_FILE, "---section---\n")
+                
+                # C) Resetujemy pod nową sekcję
+                section_counter += 1
+                current_section_widths = [] 
+                
+                print(f"!!! WYKRYTO NOWĄ SEKCJĘ (nr {section_counter}) !!!")
+                section_found_now = True # Używamy tego do pomijania logowania w tym samym cyklu
 
-        if current_start is not None and current_end is not None and current_end > current_start:
-            if last_valid_start is None:
-                last_valid_start = current_start
-                last_valid_end = current_end
-            else:
-                prev_c = (last_valid_start + last_valid_end) / 2
-                curr_c = (current_start + current_end) / 2
-                if abs(curr_c - prev_c) < max_jump_limit:
-                    last_valid_start = current_start
-                    last_valid_end = current_end
+            # Wizualizacja
+            cv2.arrowedLine(draw_frame, (start_x, scan_y), (end_x, scan_y), (0, 0, 255), 3)
+            cv2.arrowedLine(draw_frame, (end_x, scan_y), (start_x, scan_y), (0, 0, 255), 3)
+            cv2.putText(draw_frame, f"W: {width_px}", (start_x, scan_y - 10), 
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # 4. Zbieranie danych (jeśli nie ma właśnie łączenia)
+            if not section_found_now:
+                # Dodajemy KAŻDY poprawny pomiar do listy statystyk sekcji
+                current_section_widths.append(width_px)
 
-        # --- RYSOWANIE LINII POMIAROWYCH ---
-        cv2.line(draw_frame, (0, scan_y), (width, scan_y), (100, 100, 100), 1)
-
-        if last_valid_start is not None and last_valid_end is not None:
-            distance = last_valid_end - last_valid_start
-            cv2.arrowedLine(draw_frame, (last_valid_start, scan_y), (last_valid_end, scan_y), (0, 0, 255), 3, tipLength=0.05)
-            cv2.arrowedLine(draw_frame, (last_valid_end, scan_y), (last_valid_start, scan_y), (0, 0, 255), 3, tipLength=0.05)
-            cv2.circle(draw_frame, (last_valid_start, scan_y), 6, (0, 255, 0), -1)
-            cv2.circle(draw_frame, (last_valid_end, scan_y), 6, (0, 255, 0), -1)
-            cv2.putText(draw_frame, f"SZEROKOSC: {distance} px", (last_valid_start + 10, scan_y - 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                # Zapis do pliku pomiary.txt co interwał (żeby nie zapchać dysku)
+                if current_time - last_measurement_log_time > MEASUREMENT_LOG_INTERVAL:
+                    
+                    # ZMIANA: Uproszczony i jednolity format TIMESTAMP dla pomiarów
+                    ts_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    log_data(DATA_FILE, f"{ts_str};{width_px}\n")
+                    last_measurement_log_time = current_time
+        
         else:
             cv2.putText(draw_frame, "Szukam krawedzi...", (50, scan_y - 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # --- ŁĄCZENIE I WIZUALIZACJA ---
-        mask_bgr = cv2.cvtColor(algorithm_mask, cv2.COLOR_GRAY2BGR)
-        combined_view = cv2.hconcat([draw_frame, mask_bgr])
+        # Informacja na ekranie (wizualna)
+        if current_time - section_detector.last_detection_time < 1.0:
+             cv2.putText(draw_frame, f"SEKCJA {section_counter} START!", (frame.shape[1]//2 - 150, scan_y - 50), 
+                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 255), 3)
+
+        # Podgląd
+        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        combined = cv2.hconcat([draw_frame, mask_bgr])
+        final = cv2.resize(combined, (0,0), fx=0.5, fy=0.5)
         
-        scale = 0.4 
-        h_comb, w_comb = combined_view.shape[:2]
-        final_preview = cv2.resize(combined_view, (int(w_comb * scale), int(h_comb * scale)))
-
-        cv2.imshow('System Inspekcji', final_preview)
-
-        if cv2.waitKey(20) & 0xFF == ord('q'):
+        cv2.imshow('System', final)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+    # PO ZAKOŃCZENIU PĘTLI (np. klawisz 'q')
+    # Zapisz statystyki ostatniej, niedokończonej sekcji
+    if current_section_widths:
+        print("Zapisywanie ostatniej sekcji przy wyjściu...")
+        save_section_stats(section_counter, current_section_widths)
+        # Zamykamy ostatnią sekcję separatorem
+        log_data(DATA_FILE, "---section---\n")
 
     cap.release()
     cv2.destroyAllWindows()
 
-video_source = 'test1.mkv' 
-main(video_source)
+if __name__ == "__main__":
+    main()
