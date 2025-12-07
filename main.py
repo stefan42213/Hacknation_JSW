@@ -14,7 +14,7 @@ WARNING_FILE = "data/warning.txt"
 STATS_FILE = "data/max_min_values.txt" # Nowy plik do statystyk
 
 MEASUREMENT_LOG_INTERVAL = 0.5  # Co ile sekund zapisywać szerokość do pliku pomiary
-TIME_TO_WAIT_FOR_STOP = 3.0      # Alarm braku ruchu
+TIME_TO_WAIT_FOR_STOP = 10.0     # Alarm braku ruchu
 
 def log_data(filename, text):
     """Uniwersalna funkcja zapisu"""
@@ -174,4 +174,5 @@ def main():
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
+
     main()
