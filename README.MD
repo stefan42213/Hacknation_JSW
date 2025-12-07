@@ -1,14 +1,14 @@
-Oto zaktualizowany i gotowy plik **README** uwzględniający strukturę katalogów (`video/` i `data/`) oraz funkcjonalności modułów.
+
 
 -----
 
-# 🤖 VisionBeltMonitor: System Monitorowania i Pomiaru Taśmy Produkcyjnej
+# VisionBeltMonitor: System Monitorowania i Pomiaru Taśmy Produkcyjnej
 
 VisionBeltMonitor to system wizyjny oparty na **OpenCV**, zaprojektowany do ciągłego monitorowania, pomiaru szerokości elementów na taśmie produkcyjnej oraz generowania alarmów w przypadku przestojów.
 
 -----
 
-## 🚀 Wprowadzenie i Kluczowe Funkcjonalności
+## Wprowadzenie i Kluczowe Funkcjonalności
 
 System automatycznie segmentuje strumień wideo na logiczne sekcje produkcyjne, mierzy każdy element i generuje szczegółowe statystyki oraz ostrzeżenia w czasie rzeczywistym.
 
@@ -19,7 +19,7 @@ System automatycznie segmentuje strumień wideo na logiczne sekcje produkcyjne, 
 
 -----
 
-## 🛠️ Struktura Projektu i Instalacja
+## Struktura Projektu i Instalacja
 
 ### 1\. Struktura Folderów
 
@@ -48,7 +48,7 @@ pip install opencv-python numpy
 
 -----
 
-## ⚙️ Konfiguracja (Plik `main.py`)
+## Konfiguracja (Plik `main.py`)
 
 Zmienne konfiguracyjne określają ścieżki do plików, interwały logowania i czułość alarmów:
 
@@ -61,7 +61,7 @@ Zmienne konfiguracyjne określają ścieżki do plików, interwały logowania i 
 
 -----
 
-## 🧩 Opis Modułów
+## Opis Modułów
 
 ### `main.py` (Kierownik Zmiany)
 
@@ -88,7 +88,7 @@ Odpowiada za segmentację produktu.
 
 -----
 
-## 📊 Format Plików Wynikowych (Wszystkie w `data/`)
+## Format Plików Wynikowych (Wszystkie w `data/`)
 
 ### 1\. `pomiary.txt` (Surowe dane pomiarowe)
 
@@ -114,12 +114,13 @@ Odpowiada za segmentację produktu.
 
 -----
 
-## ▶️ Uruchomienie
+## Uruchomienie
 
 Uruchom główny skrypt z katalogu głównego projektu:
 
 ```bash
 python main.py
 ```
+
 
 Wyjście z programu następuje po wciśnięciu klawisza **`q`** w oknie podglądu. Po zakończeniu, system zapisze statystyki ostatniej, trwającej sekcji.
